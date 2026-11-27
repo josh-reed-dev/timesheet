@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Timesheet</title>
+<style>
+:root {
+  --bg: #f7f7f5; --card: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e4e3df;
+  --accent: #2f6f5e; --accent-soft: #e3efea; --bar: #2f6f5e; --danger: #a33a2c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --card: #1f1f1d; --text: #ecebe7; --muted: #9b9a94; --line: #33332f;
+    --accent: #7cc4ad; --accent-soft: #23332e; --bar: #7cc4ad; --danger: #e48a7d;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
+h1 { font-size: 22px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.muted { color: var(--muted); font-size: 13px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, select, input { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+button { cursor: pointer; }
+button.on { background: var(--accent); border-color: var(--accent); color: var(--card); }
+button.link { border: 0; background: none; color: var(--muted); padding: 0; text-decoration: underline; }
+input[type=password] { width: 100%; max-width: 420px; }
+.totals { display: flex; flex-wrap: wrap; gap: 24px; }
+.total .n { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.total .l { color: var(--muted); font-size: 13px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; }
+td.title { white-space: normal; min-width: 220px; }
+tr.sum td { font-weight: 600; border-bottom: 0; }
+.bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--bar); vertical-align: middle; margin-left: 8px; }
+a { color: var(--accent); }
+.err { color: var(--danger); }
+ol { padding-left: 20px; margin: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Timesheet</h1>
+    <span class="muted" id="updated"></span>
+  </header>
+
+  <section class="card" id="login" hidden>
+    <h2>Connect to your tracker</h2>
+    <p class="muted">Your hours live in the private <code>autopilot</code> repo. This page reads them in your browser with a read-only token that stays in this browser only.</p>
+    <ol class="muted">
+      <li>Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>: repository access <b>Only select repositories → autopilot</b>, permission <b>Contents: Read-only</b>.</li>
+      <li>Paste it here.</li>
+    </ol>
+    <form id="token-form" class="controls">
+      <input type="password" id="token" placeholder="github_pat_…" autocomplete="off" required>
+      <button type="submit" class="on">Show timesheet</button>
+    </form>
+    <p class="err" id="login-err"></p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="card controls" id="filters">
+      <span id="ranges"></span>
+      <input type="date" id="from" aria-label="From">
+      <span class="muted">to</span>
+      <input type="date" id="to" aria-label="To">
+      <select id="project" aria-label="Project"></select>
+      <button id="csv">Download CSV</button>
+    </section>
+
+    <section class="card">
+      <div class="totals" id="totals"></div>
+    </section>
+
+    <section class="card">
+      <h2>By day</h2>
+      <div class="scroll"><table id="days"></table></div>
+    </section>
+
+    <section class="card">
+      <h2>By issue</h2>
+      <div class="scroll"><table id="issues"></table></div>
+    </section>
+
+    <p class="muted">Synced from each Mac about once an hour while Claude is in use. <button class="link" id="signout">Forget token</button></p>
+  </div>
+</main>
+
+<script>
+const SRC = "https://api.github.com/repos/josh-reed-dev/autopilot/contents/time/summary.json";
+const ISSUE = "https://github.com/josh-reed-dev/autopilot/issues/";
+const KEY = "timesheet-token";
+const $ = (id) => document.getElementById(id);
+const store = {
+  get() { try { return localStorage.getItem(KEY); } catch (e) { return null; } },
+  set(v) { try { localStorage.setItem(KEY, v); } catch (e) {} },
+  clear() { try { localStorage.removeItem(KEY); } catch (e) {} },
+};
+let rows = [], token = store.get();
+
+const iso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const h = (n) => n.toFixed(2);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function weekStart(d) { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function ranges() {
+  const t = new Date(), ws = weekStart(t), lw = new Date(ws); lw.setDate(lw.getDate() - 7);
+  const lwEnd = new Date(ws); lwEnd.setDate(lwEnd.getDate() - 1);
+  const ms = new Date(t.getFullYear(), t.getMonth(), 1), lm = new Date(t.getFullYear(), t.getMonth() - 1, 1);
+  const lmEnd = new Date(t.getFullYear(), t.getMonth(), 0);
+  return {
+    "This week": [iso(ws), iso(t)], "Last week": [iso(lw), iso(lwEnd)],
+    "This month": [iso(ms), iso(t)], "Last month": [iso(lm), iso(lmEnd)], "All": ["", ""],
+  };
+}
+
+async function load() {
+  const r = await fetch(SRC, { headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github.raw+json" }, cache: "no-store" });
+  if (r.status === 401 || r.status === 403 || r.status === 404) throw new Error("GitHub refused the token (" + r.status + "). Check it can read the autopilot repo's contents.");
+  if (!r.ok) throw new Error("Couldn't load hours (" + r.status + ").");
+  const data = await r.json();
+  rows = data.rows;
+  $("updated").textContent = "Last sync " + new Date(data.updated).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+function setRange(name) {
+  const [a, b] = ranges()[name];
+  $("from").value = a; $("to").value = b;
+  document.querySelectorAll("#ranges button").forEach((x) => x.classList.toggle("on", x.textContent === name));
+  render();
+}
+
+function shown() {
+  const a = $("from").value || "0000", b = $("to").value || "9999", p = $("project").value;
+  return rows.filter((r) => r.day >= a && r.day <= b && (!p || r.project === p));
+}
+
+function render() {
+  const sel = shown();
+  const projects = [...new Set(sel.map((r) => r.project))].sort();
+  const byProject = {}, total = sel.reduce((s, r) => s + r.hours, 0);
+  sel.forEach((r) => (byProject[r.project] = (byProject[r.project] || 0) + r.hours));
+
+  $("totals").innerHTML = [`<div class="total"><div class="n">${h(total)}h</div><div class="l">Total</div></div>`]
+    .concat(projects.map((p) => `<div class="total"><div class="n">${h(byProject[p])}h</div><div class="l">${esc(p)}</div></div>`)).join("");
+
+  const days = {};
+  sel.forEach((r) => { days[r.day] = days[r.day] || {}; days[r.day][r.project] = (days[r.day][r.project] || 0) + r.hours; });
+  const dayKeys = Object.keys(days).sort().reverse();
+  const max = Math.max(1, ...dayKeys.map((d) => Object.values(days[d]).reduce((s, x) => s + x, 0)));
+  $("days").innerHTML = dayKeys.length ? `<tr><th>Day</th>${projects.map((p) => `<th class="num">${esc(p)}</th>`).join("")}<th class="num">Total</th><th></th></tr>` +
+    dayKeys.map((d) => {
+      const t = Object.values(days[d]).reduce((s, x) => s + x, 0);
+      const label = new Date(d + "T12:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+      return `<tr><td>${label}</td>${projects.map((p) => `<td class="num">${days[d][p] ? h(days[d][p]) : ""}</td>`).join("")}<td class="num"><b>${h(t)}</b></td><td><span class="bar" style="width:${Math.round((t / max) * 120)}px"></span></td></tr>`;
+    }).join("") : `<tr><td class="muted">No hours in this range.</td></tr>`;
+
+  const issues = {};
+  sel.forEach((r) => {
+    const k = r.project + "|" + (r.issue ?? "");
+    issues[k] = issues[k] || { project: r.project, issue: r.issue, title: r.title, hours: 0 };
+    issues[k].hours += r.hours;
+  });
+  const list = Object.values(issues).sort((a, b) => a.project.localeCompare(b.project) || b.hours - a.hours);
+  $("issues").innerHTML = list.length ? `<tr><th>Project</th><th>Issue</th><th class="num">Hours</th></tr>` +
+    list.map((i) => `<tr><td>${esc(i.project)}</td><td class="title">${i.issue ? `<a href="${ISSUE}${i.issue}" target="_blank" rel="noopener">#${i.issue}</a> ${esc(i.title)}` : '<span class="muted">No issue</span>'}</td><td class="num">${h(i.hours)}</td></tr>`).join("") +
+    `<tr class="sum"><td></td><td>Total</td><td class="num">${h(total)}</td></tr>` : "";
+}
+
+function csv() {
+  const lines = [["day", "project", "issue", "title", "hours"]].concat(shown().map((r) => [r.day, r.project, r.issue ?? "", r.title, h(r.hours)]));
+  const text = lines.map((l) => l.map((v) => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : v).join(",")).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = "timesheet-" + ($("from").value || "start") + "-to-" + ($("to").value || iso(new Date())) + ".csv";
+  a.click();
+}
+
+async function start() {
+  if (!token) { $("login").hidden = false; $("app").hidden = true; return; }
+  try {
+    await load();
+  } catch (e) {
+    store.clear(); token = null;
+    $("login-err").textContent = e.message;
+    $("login").hidden = false; $("app").hidden = true;
+    return;
+  }
+  $("login").hidden = true; $("app").hidden = false;
+  const projects = [...new Set(rows.map((r) => r.project))].sort();
+  $("project").innerHTML = `<option value="">All projects</option>` + projects.map((p) => `<option>${esc(p)}</option>`).join("");
+  $("ranges").innerHTML = Object.keys(ranges()).map((n) => `<button type="button">${n}</button>`).join(" ");
+  document.querySelectorAll("#ranges button").forEach((b) => b.addEventListener("click", () => setRange(b.textContent)));
+  setRange("This week");
+}
+
+$("token-form").addEventListener("submit", (e) => { e.preventDefault(); token = $("token").value.trim(); store.set(token); $("token").value = ""; $("login-err").textContent = ""; start(); });
+["from", "to", "project"].forEach((id) => $(id).addEventListener("change", () => { document.querySelectorAll("#ranges button").forEach((x) => x.classList.remove("on")); render(); }));
+$("csv").addEventListener("click", csv);
+$("signout").addEventListener("click", () => { store.clear(); token = null; start(); });
+start();
+</script>
+</body>
+</html>
