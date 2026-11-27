@@ -39,6 +39,7 @@ th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line
 th { font-size: 12px; color: var(--muted); font-weight: 600; }
 td.num, th.num { text-align: right; }
 td.title { white-space: normal; min-width: 220px; }
+.desc { color: var(--muted); font-size: 13px; margin-top: 2px; }
 tr.sum td { font-weight: 600; border-bottom: 0; }
 .bar { display: inline-block; height: 6px; border-radius: 3px; background: var(--bar); vertical-align: middle; margin-left: 8px; }
 a { color: var(--accent); }
@@ -109,6 +110,8 @@ let rows = [], token = store.get();
 
 const iso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 const h = (n) => n.toFixed(2);
+const PR = (ref) => { const [repo, n] = ref.split("#"); return `<a href="https://github.com/${esc(repo)}/pull/${esc(n)}" target="_blank" rel="noopener">${esc(repo.split("/").pop())}#${esc(n)}</a>`; };
+const addNew = (to, xs) => (xs || []).forEach((x) => to.includes(x) || to.push(x));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 function weekStart(d) { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
 function ranges() {
@@ -166,17 +169,26 @@ function render() {
   const issues = {};
   sel.forEach((r) => {
     const k = r.project + "|" + (r.issue ?? "");
-    issues[k] = issues[k] || { project: r.project, issue: r.issue, title: r.title, hours: 0 };
+    issues[k] = issues[k] || { project: r.project, issue: r.issue, title: r.title, hours: 0, notes: [], prs: [] };
     issues[k].hours += r.hours;
+    addNew(issues[k].notes, r.notes);
+    addNew(issues[k].prs, r.prs);
   });
   const list = Object.values(issues).sort((a, b) => a.project.localeCompare(b.project) || b.hours - a.hours);
   $("issues").innerHTML = list.length ? `<tr><th>Project</th><th>Issue</th><th class="num">Hours</th></tr>` +
-    list.map((i) => `<tr><td>${esc(i.project)}</td><td class="title">${i.issue ? `<a href="${ISSUE}${i.issue}" target="_blank" rel="noopener">#${i.issue}</a> ${esc(i.title)}` : '<span class="muted">No issue</span>'}</td><td class="num">${h(i.hours)}</td></tr>`).join("") +
+    list.map((i) => `<tr><td>${esc(i.project)}</td><td class="title">${i.issue ? `<a href="${ISSUE}${i.issue}" target="_blank" rel="noopener">#${i.issue}</a> ${esc(i.title)}` : '<span class="muted">No issue</span>'}${desc(i)}</td><td class="num">${h(i.hours)}</td></tr>`).join("") +
     `<tr class="sum"><td></td><td>Total</td><td class="num">${h(total)}</td></tr>` : "";
 }
 
+// What was worked on: session titles and manual-entry notes, then the PRs opened.
+function desc(i) {
+  const parts = [i.notes.map(esc).join("; "), i.prs.length ? "PRs: " + i.prs.map(PR).join(", ") : ""].filter(Boolean);
+  return parts.length ? `<div class="desc">${parts.join(" · ")}</div>` : "";
+}
+
 function csv() {
-  const lines = [["day", "project", "issue", "title", "hours"]].concat(shown().map((r) => [r.day, r.project, r.issue ?? "", r.title, h(r.hours)]));
+  const describe = (r) => [(r.notes || []).join("; "), (r.prs || []).length ? "PRs: " + r.prs.join(", ") : ""].filter(Boolean).join(" · ");
+  const lines = [["day", "project", "issue", "title", "hours", "description"]].concat(shown().map((r) => [r.day, r.project, r.issue ?? "", r.title, h(r.hours), describe(r)]));
   const text = lines.map((l) => l.map((v) => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : v).join(",")).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
